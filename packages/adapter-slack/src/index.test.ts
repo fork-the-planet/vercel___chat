@@ -7909,23 +7909,68 @@ describe("routeSocketEvent with options", () => {
 // ============================================================================
 
 describe("stream with empty threadTs", () => {
-  it("throws ValidationError when threadTs is empty", async () => {
+  it("delegates to fallback before consuming the stream", async () => {
     const adapter = createSlackAdapter({
       botToken: "xoxb-test-token",
       signingSecret: "test-signing-secret",
       logger: mockLogger,
     });
 
-    async function* emptyStream() {
-      yield "hello";
-    }
+    const next = vi.fn();
+    const stream = {
+      [Symbol.asyncIterator]: () => ({ next }),
+    };
 
     await expect(
-      adapter.stream("slack:C123:", emptyStream(), {
+      adapter.stream("slack:C123:", stream, {
         recipientUserId: "U123",
         recipientTeamId: "T123",
       })
-    ).rejects.toThrow(ValidationError);
+    ).resolves.toBeNull();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("delegates channel streams without recipient context to fallback", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: "test-signing-secret",
+      logger: mockLogger,
+    });
+    const next = vi.fn();
+    const stream = {
+      [Symbol.asyncIterator]: () => ({ next }),
+    };
+
+    await expect(
+      adapter.stream("slack:C123:1234567890.000000", stream)
+    ).resolves.toBeNull();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("allows DM streams without recipient context", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: "test-signing-secret",
+      logger: mockLogger,
+    });
+    const append = vi.fn().mockResolvedValue(null);
+    const stop = vi.fn().mockResolvedValue({
+      ok: true,
+      ts: "1234567890.111111",
+    });
+    const chatStream = vi.fn().mockReturnValue({ append, stop });
+    mockClientMethod(adapter, "chatStream", chatStream);
+
+    async function* stream() {
+      yield "hello";
+    }
+
+    await adapter.stream("slack:D123:1234567890.000000", stream());
+
+    expect(chatStream).toHaveBeenCalledWith({
+      channel: "D123",
+      thread_ts: "1234567890.000000",
+    });
   });
 
   it("passes token on stream stop", async () => {

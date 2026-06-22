@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const HELP_REGEX = /help/i;
 const HELLO_REGEX = /hello/i;
 
+async function* chunks(): AsyncGenerator<string> {
+  yield "Hello";
+}
+
 import { Chat } from "./chat";
 import { getEmoji } from "./emoji";
 import { LockError } from "./errors";
@@ -997,6 +1001,34 @@ describe("Chat", () => {
         "Thanks for the reaction!"
       );
     });
+
+    it("should allow streaming from a reaction without message context", async () => {
+      chat.onReaction(async (event) => {
+        await event.thread.post(chunks());
+      });
+
+      const event: Omit<ReactionEvent, "thread"> = {
+        emoji: getEmoji("thumbs_up"),
+        rawEmoji: "+1",
+        added: true,
+        user: {
+          userId: "U123",
+          userName: "user",
+          fullName: "Test User",
+          isBot: false,
+          isMe: false,
+        },
+        messageId: "msg-1",
+        threadId: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        raw: {},
+      };
+
+      chat.processReaction(event);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(mockAdapter.editMessage).toHaveBeenCalled();
+    });
   });
 
   describe("Actions", () => {
@@ -1028,6 +1060,32 @@ describe("Chat", () => {
       expect(receivedEvent.actionId).toBe("approve");
       expect(receivedEvent.value).toBe("order-123");
       expect(receivedEvent.thread).toBeDefined();
+    });
+
+    it("should allow streaming from an action without message context", async () => {
+      chat.onAction(async (event) => {
+        await event.thread?.post(chunks());
+      });
+
+      const event: Omit<ActionEvent, "thread" | "openModal"> = {
+        actionId: "approve",
+        value: "order-123",
+        user: {
+          userId: "U123",
+          userName: "user",
+          fullName: "Test User",
+          isBot: false,
+          isMe: false,
+        },
+        messageId: "",
+        threadId: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        raw: {},
+      };
+
+      await chat.processAction(event, undefined);
+
+      expect(mockAdapter.editMessage).toHaveBeenCalled();
     });
 
     it("should call onAction handler for specific action IDs", async () => {
@@ -1652,6 +1710,14 @@ describe("Chat", () => {
         "Hello via DM!"
       );
     });
+
+    it("should allow streaming to a DM thread", async () => {
+      const thread = await chat.openDM("U123456");
+
+      await thread.post(chunks());
+
+      expect(mockAdapter.editMessage).toHaveBeenCalled();
+    });
   });
 
   describe("Options Load", () => {
@@ -1817,6 +1883,14 @@ describe("Chat", () => {
         "slack:C123:1234.5678",
         "Hello from outside a webhook!"
       );
+    });
+
+    it("should allow streaming to a thread handle", async () => {
+      const thread = chat.thread("slack:C123:1234.5678");
+
+      await thread.post(chunks());
+
+      expect(mockAdapter.editMessage).toHaveBeenCalled();
     });
 
     it("should throw for an invalid thread ID", () => {

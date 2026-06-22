@@ -3949,28 +3949,27 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
    * streaming API as chunk payloads, enabling native task progress cards
    * and plan displays in the Slack AI Assistant UI.
    *
-   * Requires `recipientUserId` and `recipientTeamId` in options.
+   * Falls back to post-and-edit when the thread lacks native stream context.
    */
   async stream(
     threadId: string,
     textStream: AsyncIterable<string | StreamChunk>,
     options?: StreamOptions
-  ): Promise<RawMessage<unknown>> {
-    if (!(options?.recipientUserId && options?.recipientTeamId)) {
-      throw new ValidationError(
-        "slack",
-        "Slack streaming requires recipientUserId and recipientTeamId in options"
-      );
-    }
+  ): Promise<RawMessage<unknown> | null> {
     const { channel, threadTs: rawThreadTs } = this.decodeThreadId(threadId);
-    // Normalize empty threadTs to undefined to avoid Slack API "invalid_thread_ts" errors
     const threadTs = rawThreadTs || undefined;
     if (!threadTs) {
-      this.logger.debug("Slack: stream skipped - no thread context");
-      throw new ValidationError(
-        "slack",
-        "Slack streaming requires a valid thread context (non-empty threadTs)"
-      );
+      this.logger.debug("Slack: using fallback stream - no thread context");
+      return null;
+    }
+    if (
+      !(
+        channel.startsWith("D") ||
+        (options?.recipientUserId && options?.recipientTeamId)
+      )
+    ) {
+      this.logger.debug("Slack: using fallback stream - no recipient context");
+      return null;
     }
     this.logger.debug("Slack: starting stream", { channel, threadTs });
 
@@ -3978,9 +3977,13 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
     const streamer = this._client.chatStream({
       channel,
       thread_ts: threadTs,
-      recipient_user_id: options.recipientUserId,
-      recipient_team_id: options.recipientTeamId,
-      ...(options.taskDisplayMode && {
+      ...(options?.recipientUserId && {
+        recipient_user_id: options.recipientUserId,
+      }),
+      ...(options?.recipientTeamId && {
+        recipient_team_id: options.recipientTeamId,
+      }),
+      ...(options?.taskDisplayMode && {
         task_display_mode: options.taskDisplayMode,
       }),
     });
