@@ -171,6 +171,18 @@ describe("constructor env var resolution", () => {
     expect(adapter).toBeInstanceOf(DiscordAdapter);
   });
 
+  it("should resolve respondToChannelIds from DISCORD_RESPOND_TO_CHANNEL_IDS env var", () => {
+    process.env.DISCORD_BOT_TOKEN = "env-token";
+    process.env.DISCORD_PUBLIC_KEY = testPublicKey;
+    process.env.DISCORD_APPLICATION_ID = "env-app-id";
+    process.env.DISCORD_RESPOND_TO_CHANNEL_IDS = "channel1, channel2";
+    const adapter = new DiscordAdapter();
+    expect(
+      (adapter as unknown as { respondToChannelIds: string[] })
+        .respondToChannelIds
+    ).toEqual(["channel1", "channel2"]);
+  });
+
   it("should default logger when not provided", () => {
     process.env.DISCORD_BOT_TOKEN = "env-token";
     process.env.DISCORD_PUBLIC_KEY = testPublicKey;
@@ -3661,6 +3673,142 @@ describe("legacy gateway interactions", () => {
     );
   });
 
+  it("creates a thread for messages in an allowlisted channel", async () => {
+    const adapter = new TestGatewayDiscordAdapter({
+      botToken: "test-token",
+      publicKey: testPublicKey,
+      applicationId: "test-app-id",
+      logger: mockLogger,
+      respondToChannelIds: ["channel456"],
+    });
+    const fetchSpy = vi.spyOn(adapter as any, "discordFetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "thread789", name: "Thread" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+    const chat = createMockChatInstance();
+    await adapter.initialize(chat);
+
+    const client = createGatewayClient();
+    adapter.listen(client);
+    client.emit(Events.MessageCreate, {
+      id: "msg123",
+      channelId: "channel456",
+      guildId: "guild1",
+      content: "No mention needed",
+      author: {
+        id: "user789",
+        username: "testuser",
+        displayName: "Test User",
+        bot: false,
+      },
+      mentions: { everyone: false, roles: [], has: () => false },
+      channel: { isThread: () => false },
+      createdAt: new Date("2021-01-01T00:00:00.000Z"),
+      editedAt: null,
+      attachments: [],
+    });
+    await waitForGatewayHandlers();
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/channels/channel456/messages/msg123/threads",
+      "POST",
+      expect.anything()
+    );
+    expect(chat.handleIncomingMessage).toHaveBeenCalledWith(
+      adapter,
+      "discord:guild1:channel456:thread789",
+      expect.objectContaining({ isMention: true })
+    );
+  });
+
+  it("reuses the existing thread for messages in a thread of an allowlisted channel", async () => {
+    const adapter = new TestGatewayDiscordAdapter({
+      botToken: "test-token",
+      publicKey: testPublicKey,
+      applicationId: "test-app-id",
+      logger: mockLogger,
+      respondToChannelIds: ["channel456"],
+    });
+    const fetchSpy = vi
+      .spyOn(adapter as any, "discordFetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    const chat = createMockChatInstance();
+    await adapter.initialize(chat);
+
+    const client = createGatewayClient();
+    adapter.listen(client);
+    client.emit(Events.MessageCreate, {
+      id: "msg456",
+      channelId: "thread789",
+      guildId: "guild1",
+      content: "Thread reply without mention",
+      author: {
+        id: "user789",
+        username: "testuser",
+        displayName: "Test User",
+        bot: false,
+      },
+      mentions: { everyone: false, roles: [], has: () => false },
+      channel: { isThread: () => true, parentId: "channel456" },
+      createdAt: new Date("2021-01-01T00:00:00.000Z"),
+      editedAt: null,
+      attachments: [],
+    });
+    await waitForGatewayHandlers();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(chat.handleIncomingMessage).toHaveBeenCalledWith(
+      adapter,
+      "discord:guild1:channel456:thread789",
+      expect.objectContaining({ isMention: true })
+    );
+  });
+
+  it("does not treat a parentless thread message as allowlisted", async () => {
+    const adapter = new TestGatewayDiscordAdapter({
+      botToken: "test-token",
+      publicKey: testPublicKey,
+      applicationId: "test-app-id",
+      logger: mockLogger,
+      respondToChannelIds: ["channel456"],
+    });
+    const fetchSpy = vi
+      .spyOn(adapter as any, "discordFetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    const chat = createMockChatInstance();
+    await adapter.initialize(chat);
+
+    const client = createGatewayClient();
+    adapter.listen(client);
+    client.emit(Events.MessageCreate, {
+      id: "msg000",
+      channelId: "thread000",
+      guildId: "guild1",
+      content: "Orphan thread message",
+      author: {
+        id: "user789",
+        username: "testuser",
+        displayName: "Test User",
+        bot: false,
+      },
+      mentions: { everyone: false, roles: [], has: () => false },
+      channel: { isThread: () => true, parentId: null },
+      createdAt: new Date("2021-01-01T00:00:00.000Z"),
+      editedAt: null,
+      attachments: [],
+    });
+    await waitForGatewayHandlers();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(chat.handleIncomingMessage).toHaveBeenCalledWith(
+      adapter,
+      "discord:guild1:thread000",
+      expect.objectContaining({ isMention: false })
+    );
+  });
+
   it("handles component interactions from the gateway", async () => {
     const adapter = new TestGatewayDiscordAdapter({
       botToken: "test-token",
@@ -4081,6 +4229,83 @@ describe("handleForwardedMessage - thread handling", () => {
     );
 
     fetchSpy.mockRestore();
+  });
+
+  it("keeps allowlisted forwarded messages in their Discord thread", async () => {
+    const adapter = createDiscordAdapter({
+      botToken: "test-token",
+      publicKey: testPublicKey,
+      applicationId: "test-app-id",
+      logger: mockLogger,
+      respondToChannelIds: ["channel456"],
+    });
+    const fetchSpy = vi.spyOn(adapter as any, "discordFetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "thread789", name: "Thread" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+    const chat = createMockChatInstance();
+    await adapter.initialize(chat);
+
+    const forward = (data: Record<string, unknown>) =>
+      adapter.handleWebhook(
+        new Request("https://example.com/webhook", {
+          method: "POST",
+          headers: {
+            "x-discord-gateway-token": "test-token",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            type: "GATEWAY_MESSAGE_CREATE",
+            timestamp: Date.now(),
+            data,
+          }),
+        })
+      );
+    const message = {
+      guild_id: "guild1",
+      content: "No mention needed",
+      timestamp: "2021-01-01T00:00:00.000Z",
+      author: { id: "user789", username: "testuser", bot: false },
+      mentions: [],
+      attachments: [],
+    };
+
+    await forward({ ...message, id: "msg123", channel_id: "channel456" });
+    await forward({
+      ...message,
+      id: "msg456",
+      channel_id: "thread789",
+      thread: { id: "thread789", parent_id: "channel456" },
+    });
+    await forward({
+      ...message,
+      id: "msg789",
+      channel_id: "thread789",
+      author: { id: "other-bot", username: "other-bot", bot: true },
+      thread: { id: "thread789", parent_id: "channel456" },
+    });
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(chat.handleIncomingMessage).toHaveBeenNthCalledWith(
+      1,
+      adapter,
+      "discord:guild1:channel456:thread789",
+      expect.objectContaining({ isMention: true })
+    );
+    expect(chat.handleIncomingMessage).toHaveBeenNthCalledWith(
+      2,
+      adapter,
+      "discord:guild1:channel456:thread789",
+      expect.objectContaining({ isMention: true })
+    );
+    expect(chat.handleIncomingMessage).toHaveBeenNthCalledWith(
+      3,
+      adapter,
+      "discord:guild1:channel456:thread789",
+      expect.objectContaining({ isMention: false })
+    );
   });
 });
 
